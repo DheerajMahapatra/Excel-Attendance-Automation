@@ -1,0 +1,196 @@
+<script>
+(function () {
+  if (window.__stChunkReloadGuard) return;
+  window.__stChunkReloadGuard = true;
+
+  const ERROR_PATTERN = /Failed to fetch dynamically imported module|error loading dynamically imported module|Importing a module script failed/i;
+  const ATTEMPTS_KEY = "st_chunk_reload_attempts";
+  const LAST_KEY = "st_chunk_reload_at";
+  const MAX_ATTEMPTS = 3;
+  const MIN_INTERVAL = 15000;
+  const RESET_AFTER = 300000;
+  const PRELOAD_MATCHERS = [
+    "/FileUploader/",
+    "/Selectbox/",
+    "/Table/",
+    "/TextInput/",
+    "/Checkbox/",
+    "/Button/Button.tsx",
+    "/DownloadButton/",
+    "/Metric/",
+    "/Html/",
+    "/Spinner/",
+  ];
+
+  function sleep(ms) {
+    return new Promise(function (resolve) {
+      setTimeout(resolve, ms);
+    });
+  }
+
+  async function fetchWithRetry(url, attempts, timeoutMs, consumeBody) {
+    let delay = 500;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const controller = new AbortController();
+      const timer = setTimeout(function () {
+        controller.abort();
+      }, timeoutMs);
+      try {
+        const response = await fetch(url, {
+          signal: controller.signal,
+          cache: "default",
+        });
+        clearTimeout(timer);
+        if (response.ok) {
+          if (consumeBody) await response.arrayBuffer();
+          return response;
+        }
+      } catch (error) {
+        clearTimeout(timer);
+      }
+      await sleep(delay);
+      delay = Math.min(delay * 2, 5000);
+    }
+    return null;
+  }
+
+  async function preloadComponentChunks() {
+    if (navigator.onLine === false) return;
+
+    const manifestResponse = await fetchWithRetry("./manifest.json", 6, 15000, false);
+    if (!manifestResponse) return;
+
+    let manifest;
+    try {
+      manifest = await manifestResponse.json();
+    } catch (error) {
+      return;
+    }
+
+    const alreadyLoaded = new Set(
+      performance.getEntriesByType("resource").map(function (entry) {
+        try {
+          return new URL(entry.name).pathname;
+        } catch (error) {
+          return "";
+        }
+      })
+    );
+
+    const collected = new Set();
+    const visited = new Set();
+    const priorityFiles = new Set();
+
+    function addEntry(key) {
+      if (visited.has(key)) return;
+      visited.add(key);
+      const entry = manifest[key];
+      if (!entry || typeof entry !== "object") return;
+      if (entry.file && entry.file.indexOf("static/js/") === 0) {
+        collected.add(entry.file);
+      }
+      for (const css of entry.css || []) collected.add(css);
+      for (const dependency of entry.imports || []) addEntry(dependency);
+    }
+
+    for (const key of Object.keys(manifest)) {
+      const entry = manifest[key];
+      if (!entry || typeof entry !== "object") continue;
+      const matchesComponent = PRELOAD_MATCHERS.some(function (matcher) {
+        return key.indexOf(matcher) !== -1;
+      });
+      if ((entry.isDynamicEntry && matchesComponent) || key.indexOf("_DataFrame.") === 0) {
+        if (entry.file) priorityFiles.add(entry.file);
+        addEntry(key);
+      }
+    }
+
+    const pending = Array.from(collected)
+      .filter(function (file) {
+        return !Array.from(alreadyLoaded).some(function (path) {
+          return path.endsWith("/" + file);
+        });
+      })
+      .sort(function (a, b) {
+        return Number(priorityFiles.has(b)) - Number(priorityFiles.has(a));
+      });
+
+    const deadline = Date.now() + 180000;
+    let cursor = 0;
+    async function worker() {
+      while (cursor < pending.length && Date.now() < deadline) {
+        const file = pending[cursor];
+        cursor += 1;
+        await fetchWithRetry("./" + file, 4, 15000, true);
+      }
+    }
+
+    const workerCount = Math.min(3, pending.length);
+    await Promise.all(
+      Array.from({ length: workerCount }, function () {
+        return worker();
+      })
+    );
+  }
+
+  function hasChunkError() {
+    return ERROR_PATTERN.test(document.body ? document.body.innerText : "");
+  }
+
+  function maybeReload() {
+    if (!hasChunkError()) return;
+    const attempts = Number(sessionStorage.getItem(ATTEMPTS_KEY) || "0");
+    const last = Number(sessionStorage.getItem(LAST_KEY) || "0");
+    const now = Date.now();
+    if (attempts >= MAX_ATTEMPTS || now - last < MIN_INTERVAL) return;
+    sessionStorage.setItem(ATTEMPTS_KEY, String(attempts + 1));
+    sessionStorage.setItem(LAST_KEY, String(now));
+    const url = new URL(window.location.href);
+    url.searchParams.set("_st_reload", String(attempts + 1));
+    url.searchParams.set("_st_reload_ts", String(now));
+    window.location.replace(url.toString());
+  }
+
+  let timer = null;
+  function schedule() {
+    clearTimeout(timer);
+    timer = setTimeout(maybeReload, 750);
+  }
+
+  function resetAfterHealthyPeriod() {
+    setTimeout(function () {
+      if (hasChunkError()) return;
+      sessionStorage.removeItem(ATTEMPTS_KEY);
+      sessionStorage.removeItem(LAST_KEY);
+      try {
+        const url = new URL(window.location.href);
+        if (url.searchParams.has("_st_reload") || url.searchParams.has("_st_reload_ts")) {
+          url.searchParams.delete("_st_reload");
+          url.searchParams.delete("_st_reload_ts");
+          window.history.replaceState(null, "", url.toString());
+        }
+      } catch (error) {}
+    }, RESET_AFTER);
+  }
+
+  function start() {
+    if (!document.body) return;
+    new MutationObserver(schedule).observe(document.body, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+    window.addEventListener("error", schedule, true);
+    window.addEventListener("unhandledrejection", schedule);
+    schedule();
+    resetAfterHealthyPeriod();
+    preloadComponentChunks();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", start, { once: true });
+  } else {
+    start();
+  }
+})();
+</script>
