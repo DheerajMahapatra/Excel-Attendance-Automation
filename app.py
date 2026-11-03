@@ -2,6 +2,7 @@ import io
 import random
 import re
 from datetime import date, datetime
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -14,65 +15,7 @@ NO_FILL = PatternFill(fill_type=None)
 
 ENROLLMENT_PATTERN = re.compile(r"AJU\s*/\s*\d+", re.IGNORECASE)
 DATE_HEADER_PATTERN = re.compile(r"^\s*\d{1,2}[/-]\d{1,2}[/-]\d{2,4}")
-
-CHUNK_RELOAD_GUARD = """
-<script>
-(function () {
-  if (window.__stChunkReloadGuard) return;
-  window.__stChunkReloadGuard = true;
-
-  const ATTEMPTS_KEY = "st_chunk_reload_attempts";
-  const LAST_KEY = "st_chunk_reload_at";
-  const MAX_ATTEMPTS = 2;
-  const MIN_INTERVAL = 15000;
-  const RESET_AFTER = 600000;
-  const ERROR_PATTERN = /Failed to fetch dynamically imported module|error loading dynamically imported module|Importing a module script failed/i;
-
-  function hasChunkError() {
-    return ERROR_PATTERN.test(document.body ? document.body.innerText : "");
-  }
-
-  function maybeReload() {
-    if (!hasChunkError()) return;
-    const attempts = Number(sessionStorage.getItem(ATTEMPTS_KEY) || "0");
-    const last = Number(sessionStorage.getItem(LAST_KEY) || "0");
-    const now = Date.now();
-    if (attempts >= MAX_ATTEMPTS || now - last < MIN_INTERVAL) return;
-    sessionStorage.setItem(ATTEMPTS_KEY, String(attempts + 1));
-    sessionStorage.setItem(LAST_KEY, String(now));
-    window.location.reload();
-  }
-
-  let timer = null;
-  function schedule() {
-    clearTimeout(timer);
-    timer = setTimeout(maybeReload, 750);
-  }
-
-  function start() {
-    if (!document.body) return;
-    new MutationObserver(schedule).observe(document.body, {
-      childList: true,
-      subtree: true,
-      characterData: true,
-    });
-    window.addEventListener("error", schedule, true);
-    window.addEventListener("unhandledrejection", schedule);
-    schedule();
-    setTimeout(function () {
-      sessionStorage.removeItem(ATTEMPTS_KEY);
-      sessionStorage.removeItem(LAST_KEY);
-    }, RESET_AFTER);
-  }
-
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", start, { once: true });
-  } else {
-    start();
-  }
-})();
-</script>
-"""
+RELOAD_GUARD_PATH = Path(__file__).with_name("reload_guard.html")
 
 
 def norm_enrollment(value):
@@ -694,7 +637,8 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st.html(CHUNK_RELOAD_GUARD, unsafe_allow_javascript=True)
+if RELOAD_GUARD_PATH.exists():
+    st.html(RELOAD_GUARD_PATH, unsafe_allow_javascript=True)
 
 with st.sidebar:
     st.subheader("Workflow")
@@ -708,6 +652,13 @@ with st.sidebar:
     st.caption(
         "Original files are not modified. Only matched students are updated. "
         "Unmatched students are reported and left unchanged."
+    )
+    st.markdown(
+        "<div style='font-size:0.8rem;opacity:0.7'>"
+        "Components not loading? "
+        "<a href='?_st_reload=manual' target='_self'>Reload the app</a>."
+        "</div>",
+        unsafe_allow_html=True,
     )
 
 st.title("Attendance register automation")
